@@ -69,7 +69,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessForEach {
 
 fn check_expr(cx: &LateContext<'_>, expr: &Expr<'_>, outer_span: Span) {
     if let ExprKind::MethodCall(method_name, for_each_recv, [for_each_arg], _) = expr.kind
-            && let ExprKind::MethodCall(_, iter_recv, [], _) = for_each_recv.kind
+            && let ExprKind::MethodCall(iter_method_name, iter_recv, [], _) = for_each_recv.kind
             // Skip the lint if the call chain is too long. e.g. `v.field.iter().for_each()` or
             // `v.foo().iter().for_each()` must be skipped.
             && matches!(
@@ -79,7 +79,16 @@ fn check_expr(cx: &LateContext<'_>, expr: &Expr<'_>, outer_span: Span) {
             && method_name.ident.name == sym::for_each
             && cx.ty_based_def(expr).opt_parent(cx).is_diag_item(cx, sym::Iterator)
             // Checks the type of the `iter` method receiver is NOT a user defined type.
-            && has_iter_method(cx, cx.typeck_results().expr_ty(iter_recv)).is_some()
+            && let Some(coll_sym) = has_iter_method(cx, cx.typeck_results().expr_ty(iter_recv))
+            // Skip the lint for `VecDeque` iterators: their `fold`/`try_fold` iterates the two
+            // backing slices directly, so `for_each` is faster than the suggested `for` loop,
+            // which would desugar to per-element `next()` calls with wraparound index math.
+            // See <https://github.com/rust-lang/rust-clippy/issues/17856>.
+            && !(coll_sym == sym::VecDeque
+                && matches!(
+                    iter_method_name.ident.name,
+                    sym::iter | sym::iter_mut | sym::into_iter
+                ))
             // Skip the lint if the body is not block because this is simpler than `for` loop.
             // e.g. `v.iter().for_each(f)` is simpler and clearer than using `for` loop.
             && let ExprKind::Closure(&Closure { body, fn_decl, .. }) = for_each_arg.kind

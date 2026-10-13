@@ -30,3 +30,22 @@ fn issue9912() {
         i += 1;
     });
 }
+
+fn issue17856() {
+    use std::collections::VecDeque;
+
+    // `VecDeque`'s iterators specialize `fold`/`try_fold` (two-slice iteration),
+    // so `for_each` is faster than the `for` loop this lint would suggest: do not lint.
+    let v: VecDeque<i32> = VecDeque::new();
+    v.iter().for_each(|x| {
+        println!("{x}");
+    });
+    v.into_iter().for_each(|x| {
+        println!("{x}");
+    });
+
+    let mut v: VecDeque<i32> = VecDeque::new();
+    v.iter_mut().for_each(|x| {
+        *x += 1;
+    });
+}
