@@ -152,5 +152,28 @@ LL ~     let items = get_items(&lock);
 LL +     drop(lock);
    |
 
-error: aborting due to 7 previous errors
+error: temporary with significant `Drop` can be early dropped
+  --> tests/ui/significant_drop_tightening.rs:190:9
+   |
+LL |   fn issue17824() {
+   |  _________________-
+LL | |     use std::collections::HashMap;
+...  |
+LL | |     let lock = map.lock().unwrap();
+   | |         ^^^^
+...  |
+LL | |     println!("{data}");
+LL | | }
+   | |_- temporary `lock` is currently being dropped at the end of its contained scope
+   |
+   = note: this might lead to unnecessary resource contention
+help: merge the temporary construction with its single usage
+   |
+LL ~     
+LL +     let data = map.lock().unwrap().get(&key).cloned().expect("key should exist");
+LL |
+LL ~     
+   |
+
+error: aborting due to 8 previous errors
 

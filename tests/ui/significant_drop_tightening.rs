@@ -175,3 +175,20 @@ fn issue16343() {
         println!("item {:?}", item);
     }
 }
+
+fn issue17824() {
+    use std::collections::HashMap;
+
+    // `data` borrows from `lock`, so `lock` cannot be dropped any earlier.
+    let map = Mutex::new(HashMap::from([(String::from("test"), String::new())]));
+    let key = String::from("test");
+    let lock = map.lock().unwrap();
+    let data = lock.get(&key).expect("key should exist");
+    println!("{data}");
+
+    // An owned result can be computed from a temporary lock. The whole chain of calls is kept.
+    let lock = map.lock().unwrap();
+    //~^ significant_drop_tightening
+    let data = lock.get(&key).cloned().expect("key should exist");
+    println!("{data}");
+}

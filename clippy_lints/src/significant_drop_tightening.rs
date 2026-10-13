@@ -9,6 +9,7 @@ use rustc_hir::def::{DefKind, Res};
 use rustc_hir::intravisit::{Visitor, walk_expr};
 use rustc_hir::{self as hir, HirId};
 use rustc_lint::{LateContext, LateLintPass, impl_lint_pass};
+use rustc_middle::ty::adjustment::{Adjust, DerefAdjustKind};
 use rustc_middle::ty::{GenericArgKind, Ty, Unnormalized};
 use rustc_span::symbol::Ident;
 use rustc_span::{DUMMY_SP, Span};
@@ -77,7 +78,7 @@ impl<'tcx> LateLintPass<'tcx> for SignificantDropTightening<'tcx> {
         let mut ap = AuxParams::new(&mut self.apas, &initial_dummy_stmt);
         StmtsChecker::new(&mut ap, cx, &mut self.type_cache).visit_body(body);
         for apa in ap.apas.values() {
-            if apa.counter <= 1 || !apa.has_expensive_expr_after_last_attr {
+            if apa.counter <= 1 || !apa.has_expensive_expr_after_last_attr || apa.has_borrowing_usage {
                 continue;
             }
             let first_bind_ident = apa.first_bind_ident.unwrap();
@@ -95,12 +96,12 @@ impl<'tcx> LateLintPass<'tcx> for SignificantDropTightening<'tcx> {
                             let usage_method = snippet(cx, last_method_span, "..");
                             let stmt = if let Some((binding_mode, last_bind_ident)) = apa.last_bind_ident {
                                 format!(
-                                    "\n{indent}let {}{} = {init_method}.{usage_method};",
+                                    "\n{indent}let {}{} = {init_method}{usage_method};",
                                     binding_mode.prefix_str(),
                                     snippet(cx, last_bind_ident.span, ".."),
                                 )
                             } else {
-                                format!("\n{indent}{init_method}.{usage_method};")
+                                format!("\n{indent}{init_method}{usage_method};")
                             };
 
                             diag.multipart_suggestion(
@@ -314,11 +315,12 @@ impl<'tcx> Visitor<'tcx> for StmtsChecker<'_, '_, '_, '_, 'tcx> {
                         if let hir::PatKind::Binding(binding_mode, _, ident, _) = local.pat.kind {
                             apa.last_bind_ident = Some((binding_mode, ident));
                         }
-                        if let Some(local_init) = local.init
-                            && let hir::ExprKind::MethodCall(_, _, _, span) = local_init.kind
-                        {
-                            apa.last_method_span = Some(span);
+                        // If the temporary is borrowed here, the bound value may hold that borrow, and then the
+                        // temporary has to live as long as the binding does.
+                        if is_borrowed(self.cx, expr) && has_lifetime(self.cx.typeck_results().pat_ty(local.pat)) {
+                            apa.has_borrowing_usage = true;
                         }
+                        apa.last_method_span = local.init.and_then(|init| method_chain_after(expr, init));
                     },
                     hir::StmtKind::Semi(semi_expr) => {
                         if has_drop(self.cx, semi_expr, apa.first_bind_ident) {
@@ -326,9 +328,7 @@ impl<'tcx> Visitor<'tcx> for StmtsChecker<'_, '_, '_, '_, 'tcx> {
                             apa.last_stmt_span = DUMMY_SP;
                             return;
                         }
-                        if let hir::ExprKind::MethodCall(_, _, _, span) = semi_expr.kind {
-                            apa.last_method_span = Some(span);
-                        }
+                        apa.last_method_span = method_chain_after(expr, semi_expr);
                     },
                     _ => {},
                 }
@@ -387,8 +387,10 @@ struct AuxParamsAttr {
     /// The last visited binding or variable span within a block that had any referenced inner type
     /// marked with `#[has_significant_drop]`.
     last_bind_ident: Option<(BindingMode, Ident)>,
-    /// Similar to `last_bind_span` but encompasses the right-hand method call.
+    /// The method calls of the last usage that follow the binding, starting with the leading `.`.
     last_method_span: Option<Span>,
+    /// If a usage binds a value that holds a borrow, which may borrow from the temporary.
+    has_borrowing_usage: bool,
     /// Similar to `last_bind_span` but encompasses the whole contained statement.
     last_stmt_span: Span,
 }
@@ -405,6 +407,7 @@ impl Default for AuxParamsAttr {
             first_stmt_span: DUMMY_SP,
             last_bind_ident: None,
             last_method_span: None,
+            has_borrowing_usage: false,
             last_stmt_span: DUMMY_SP,
         }
     }
@@ -445,6 +448,42 @@ fn has_drop(cx: &LateContext<'_>, expr: &hir::Expr<'_>, first_bind_ident: Option
         }
     }
     false
+}
+
+/// If `usage` is a chain of method calls whose innermost receiver is `binding`, returns the span of
+/// the calls after `binding`, e.g. `.get(&key).unwrap()` in `lock.get(&key).unwrap()`.
+fn method_chain_after(binding: &hir::Expr<'_>, usage: &hir::Expr<'_>) -> Option<Span> {
+    let mut receiver = usage;
+    while let hir::ExprKind::MethodCall(_, inner, _, _) = receiver.kind {
+        if inner.hir_id == binding.hir_id {
+            return (usage.span.ctxt() == binding.span.ctxt()).then(|| usage.span.with_lo(binding.span.hi()));
+        }
+        receiver = inner;
+    }
+    None
+}
+
+/// If `expr` is borrowed by its parent expression or by an auto-reference or overloaded deref.
+fn is_borrowed(cx: &LateContext<'_>, expr: &hir::Expr<'_>) -> bool {
+    cx.typeck_results().expr_adjustments(expr).iter().any(|adjustment| {
+        matches!(
+            adjustment.kind,
+            Adjust::Borrow(_) | Adjust::Deref(DerefAdjustKind::Overloaded(_))
+        )
+    }) || matches!(
+        cx.tcx.parent_hir_node(expr.hir_id),
+        hir::Node::Expr(parent) if matches!(
+            parent.kind,
+            hir::ExprKind::AddrOf(..)
+                | hir::ExprKind::Unary(hir::UnOp::Deref, _)
+                | hir::ExprKind::Field(..)
+                | hir::ExprKind::Index(..)
+        )
+    )
+}
+
+fn has_lifetime(ty: Ty<'_>) -> bool {
+    ty.walk().any(|arg| matches!(arg.kind(), GenericArgKind::Lifetime(_)))
 }
 
 fn is_inexpensive_expr(expr: &hir::Expr<'_>) -> bool {
