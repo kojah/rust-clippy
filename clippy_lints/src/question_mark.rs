@@ -287,13 +287,14 @@ fn expr_return_none_or_err(
 /// ```
 ///
 /// If it matches, it will suggest to use the `?` operator instead
-fn check_is_none_or_err_and_early_return<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) {
+fn check_is_none_or_err_and_early_return<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, check_result: bool) {
     if let Some(higher::If { cond, then, r#else }) = higher::If::hir(expr)
         && !is_else_clause(cx.tcx, expr)
         && let ExprKind::MethodCall(segment, caller, [], _) = &cond.kind
         && let caller_ty = cx.typeck_results().expr_ty(caller)
         && let if_block = IfBlockType::IfIs(caller, caller_ty, segment.ident.name, then)
-        && (is_early_return(sym::Option, cx, &if_block) || is_early_return(sym::Result, cx, &if_block))
+        && (is_early_return(sym::Option, cx, &if_block)
+            || (check_result && is_early_return(sym::Result, cx, &if_block)))
     {
         let mut applicability = Applicability::MachineApplicable;
         let receiver_str = snippet_with_context(cx, caller.span, expr.span.ctxt(), "..", &mut applicability).0;
@@ -515,7 +516,7 @@ fn check_if_try_match<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) {
     }
 }
 
-fn check_if_let_some_or_err_and_early_return<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) {
+fn check_if_let_some_or_err_and_early_return<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, check_result: bool) {
     if let Some(higher::IfLet {
         let_pat,
         let_expr,
@@ -536,7 +537,7 @@ fn check_if_let_some_or_err_and_early_return<'tcx>(cx: &LateContext<'tcx>, expr:
             if_else,
         )
         && let is_option_early_return = is_early_return(sym::Option, cx, &if_block)
-        && (is_option_early_return || is_early_return(sym::Result, cx, &if_block))
+        && (is_option_early_return || (check_result && is_early_return(sym::Result, cx, &if_block)))
         && if_else
             .map(|e| eq_expr_value(cx, expr.span.ctxt(), let_expr, peel_blocks(e)))
             .is_none_or(|e| !e)
@@ -659,10 +660,13 @@ impl<'tcx> LateLintPass<'tcx> for QuestionMark {
             && is_lint_allowed(cx, QUESTION_MARK_USED, expr.hir_id)
             && self.msrv.meets(cx, msrvs::QUESTION_MARK_OPERATOR)
         {
-            check_is_none_or_err_and_early_return(cx, expr);
-            check_if_let_some_or_err_and_early_return(cx, expr);
+            // In a closure with an inferred return type, `?` on a `Result` is ambiguous: it converts the
+            // error with `From::from`, so the error type can no longer be inferred.
+            let check_result = self.inferred_ret_closure_stack == 0;
+            check_is_none_or_err_and_early_return(cx, expr, check_result);
+            check_if_let_some_or_err_and_early_return(cx, expr, check_result);
 
-            if self.inferred_ret_closure_stack == 0 {
+            if check_result {
                 check_if_try_match(cx, expr);
             }
         }

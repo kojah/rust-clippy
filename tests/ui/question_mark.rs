@@ -284,6 +284,22 @@ fn infer_check() {
 
         Ok(())
     };
+
+    // https://github.com/rust-lang/rust-clippy/issues/16184
+    // The same applies to `if let Err(..)` and `is_err()` early returns.
+    _ = (|| {
+        if let Err(err) = Err::<(), _>(()) {
+            return Err(err);
+        }
+        Ok(())
+    })();
+
+    let closure = |x: Result<u8, ()>| {
+        if x.is_err() {
+            return x;
+        }
+        Ok(0)
+    };
 }
 
 // see issue #8019
