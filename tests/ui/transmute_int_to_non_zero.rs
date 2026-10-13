@@ -57,3 +57,11 @@ fn main() {
     let _: NonZero<i64> = unsafe { NonZero::new_unchecked(int_i64) };
     let _: NonZero<i128> = unsafe { NonZero::new_unchecked(int_i128) };
 }
+
+mod issue16694 {
+    // `NonZero` is not in scope here, so the suggestion must use its full path.
+    fn non_zero(value: u8) -> std::num::NonZeroU8 {
+        unsafe { std::mem::transmute(value) }
+        //~^ transmute_int_to_non_zero
+    }
+}

@@ -1,5 +1,6 @@
 use super::TRANSMUTE_INT_TO_NON_ZERO;
 use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::std_or_core;
 use clippy_utils::sugg::Sugg;
 use rustc_errors::Applicability;
 use rustc_hir::Expr;
@@ -23,13 +24,18 @@ pub(super) fn check<'tcx>(
         && from_ty == int_ty
     {
         let arg = Sugg::hir(cx, arg, "..");
+        // Spell out the path: `NonZero` is not in the prelude, so it may not be in scope.
+        let path = std_or_core(cx).map_or_else(
+            || sym::NonZero.to_string(),
+            |krate| format!("{krate}::num::{}", sym::NonZero),
+        );
         span_lint_and_sugg(
             cx,
             TRANSMUTE_INT_TO_NON_ZERO,
             e.span,
             format!("transmute from a `{from_ty}` to a `{}<{int_ty}>`", sym::NonZero),
             "consider using",
-            format!("{}::{}({arg})", sym::NonZero, sym::new_unchecked),
+            format!("{path}::{}({arg})", sym::new_unchecked),
             Applicability::Unspecified,
         );
         true
